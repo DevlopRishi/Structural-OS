@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>STRUCTURAL OS v5.1 - Fixed Axis</title>
+    <style>
+        :root {
+            --primary: #ff9900;
+            --secondary: #ff5500;
+            --bg: #050505;
+            --glass: rgba(10, 10, 10, 0.85);
+            --grid: rgba(255, 153, 0, 0.15);
+        }
+
+        body { 
+            margin: 0; 
+            background: var(--bg); 
+            overflow: hidden; 
+            font-family: 'Segoe UI', 'Courier New', monospace; 
+            user-select: none;
+        }
+
+        /* CRT Scanline Overlay */
+        body::after {
+            content: " ";
+            display: block;
+            position: absolute;
+            top: 0; left: 0; bottom: 0; right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.1) 50%);
+            z-index: 900;
+            background-size: 100% 4px;
+            pointer-events: none;
+        }
+
+        #input_video { 
+            position: absolute; width: 100vw; height: 100vh; 
+            object-fit: cover; transform: scaleX(-1); z-index: 1; opacity: 0.15; filter: grayscale(100%) contrast(1.5);
+        }
+        #three_canvas { position: absolute; top: 0; left: 0; z-index: 5; pointer-events: none; }
+        #biometric_canvas { position: absolute; width: 100vw; height: 100vh; z-index: 10; transform: scaleX(-1); pointer-events: none; }
+
+        /* HUD Interface */
+        #hud { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 100; pointer-events: none;
+        }
+
+        .panel {
+            position: absolute;
+            background: var(--glass);
+            border-left: 4px solid var(--primary);
+            padding: 15px;
+            color: var(--primary);
+            backdrop-filter: blur(5px);
+            font-size: 13px;
+            box-shadow: 5px 0 15px rgba(0,0,0,0.5);
+        }
+
+        #status-panel { top: 30px; left: 30px; width: 220px; }
+        .header { font-weight: 900; letter-spacing: 2px; margin-bottom: 10px; border-bottom: 1px solid var(--secondary); padding-bottom: 5px; color: #fff; }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .val { color: #fff; font-weight: bold; }
+        
+        #controls-legend { 
+            bottom: 30px; left: 50%; transform: translateX(-50%); 
+            display: flex; gap: 20px; border-left: none; border-bottom: 4px solid var(--primary);
+            border-radius: 5px;
+        }
+        .legend-item { display: flex; align-items: center; gap: 8px; }
+        .key { background: rgba(255,153,0,0.2); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--primary); font-weight: bold; font-size: 11px; }
+
+        #palette-strip {
+            position: absolute; top: 30px; right: 30px;
+            display: flex; flex-direction: column; gap: 5px;
+        }
+        .p-color { width: 30px; height: 30px; border: 2px solid transparent; transition: 0.2s; opacity: 0.5; }
+        .p-color.active { border-color: #fff; transform: scale(1.2); opacity: 1; box-shadow: 0 0 10px var(--primary); }
+
+        #notify {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            font-size: 32px; font-weight: 900; color: #fff;
+            text-shadow: 0 0 20px var(--primary);
+            opacity: 0; transition: opacity 0.2s; text-align: center;
+        }
+        .notify-sub { font-size: 14px; color: var(--primary); letter-spacing: 3px; display: block; margin-top: 5px; }
+
+    </style>
+</head>
+<body>
+
+    <video id="input_video" autoplay playsinline></video>
+    <canvas id="three_canvas"></canvas>
+    <canvas id="biometric_canvas"></canvas>
+
+    <div id="hud">
+        <div id="status-panel" class="panel">
+            <div class="header">ARCHITECT v5.1</div>
+            <div class="stat-row"><span>MODE</span><span id="mode_display" class="val">STANDBY</span></div>
+            <div class="stat-row"><span>BLOCKS</span><span id="block_count" class="val">0</span></div>
+            <div class="stat-row" style="margin-top: 10px; font-size: 10px; color: #888;">AXIS_CALIBRATED: TRUE</div>
+        </div>
+
+        <div id="controls-legend" class="panel">
+            <div class="legend-item"><span class="key">R PINCH</span> BUILD</div>
+            <div class="legend-item"><span class="key">L PINCH</span> ERASE</div>
+            <div class="legend-item"><span class="key">THUMB DOWN</span> COLOR</div>
+            <div class="legend-item"><span class="key">L FIST</span> PAN</div>
+        </div>
+
+        <div id="palette-strip"></div>
+        
+        <div id="notify">
+            <span id="notify-main">ACTION</span>
+            <span id="notify-sub" class="notify-sub">EXECUTED</span>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // --- CONFIG ---
+        const PALETTE = [0xff9900, 0xffffff, 0x333333, 0xff3333, 0x00ccff];
+        let currentColorIndex = 0;
+        const GRID_SIZE = 1.2;
+        
+        // --- ELEMENTS ---
+        const vid = document.getElementById('input_video');
+        const bioCanvas = document.getElementById('biometric_canvas');
+        const bioCtx = bioCanvas.getContext('2d');
+        const modeEl = document.getElementById('mode_display');
+        const countEl = document.getElementById('block_count');
+        const paletteContainer = document.getElementById('palette-strip');
+        const notifyEl = document.getElementById('notify');
+        const notifyMain = document.getElementById('notify-main');
+        const notifySub = document.getElementById('notify-sub');
+
+        // Init Palette UI
+        PALETTE.forEach((c, i) => {
+            const d = document.createElement('div');
+            d.className = `p-color ${i===0?'active':''}`;
+            d.style.backgroundColor = '#' + c.toString(16).padStart(6, '0');
+            d.id = `p-${i}`;
+            paletteContainer.appendChild(d);
+        });
+
+        // --- THREE JS ---
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x050505, 0.025);
+        
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 5, 15);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('three_canvas'), alpha: true, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+
+        const worldGroup = new THREE.Group();
+        scene.add(worldGroup);
+
+        // Grid
+        const grid = new THREE.GridHelper(40, 40, 0xff9900, 0x222222);
+        grid.position.y = -0.6;
+        worldGroup.add(grid);
+
+        // Lighting
+        const ambLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambLight);
+        const dLight = new THREE.DirectionalLight(0xffaa00, 1);
+        dLight.position.set(10, 20, 10);
+        scene.add(dLight);
+
+        // Cursor
+        const cursorGeo = new THREE.BoxGeometry(GRID_SIZE, GRID_SIZE, GRID_SIZE);
+        const cursorMat = new THREE.MeshBasicMaterial({ color: 0xff9900, wireframe: true, transparent: true, opacity: 0.8 });
+        const cursor = new THREE.Mesh(cursorGeo, cursorMat);
+        worldGroup.add(cursor);
+
+        const voxels = new Map();
+
+        // --- STATE ---
+        let lastActionTime = 0;
+        let colorCooldown = 0;
+        let isPanning = false;
+        let panStart = new THREE.Vector3();
+        let camStart = new THREE.Vector3();
+        let smoothedHands = { Left: null, Right: null };
+
+        // --- UTILS ---
+        function showNotify(main, sub) {
+            notifyMain.innerText = main;
+            notifySub.innerText = sub || "";
+            notifyEl.style.opacity = 1;
+            setTimeout(() => notifyEl.style.opacity = 0, 1500);
+        }
+
+        function updatePaletteUI() {
+            document.querySelectorAll('.p-color').forEach((el, i) => {
+                if(i === currentColorIndex) el.classList.add('active');
+                else el.classList.remove('active');
+            });
+            cursor.material.color.setHex(PALETTE[currentColorIndex]);
+        }
+
+        function createVoxel(x, y, z, color) {
+            const geo = new THREE.BoxGeometry(GRID_SIZE*0.95, GRID_SIZE*0.95, GRID_SIZE*0.95);
+            const mat = new THREE.MeshStandardMaterial({ 
+                color: color, roughness: 0.2, metalness: 0.5 
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, y, z);
+            
+            // Edges
+            const edges = new THREE.EdgesGeometry(geo);
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3 }));
+            mesh.add(line);
+            
+            return mesh;
+        }
+
+        function getDist(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        function isPinching(hand) {
+            return getDist(hand[4], hand[8]) < 0.05;
+        }
+
+        function isFist(hand) {
+            // Check if fingertips (8,12,16,20) are below PIP joints (6,10,14,18) relative to wrist
+            // Simple check: fingers curled tight
+            return (
+                hand[8].y > hand[6].y && 
+                hand[12].y > hand[10].y && 
+                hand[16].y > hand[14].y && 
+                hand[20].y > hand[18].y &&
+                getDist(hand[4], hand[8]) > 0.05 // Ensure thumb isn't pinching index
+            );
+        }
+
+        function isPalmOpen(hand) {
+            return (
+                hand[8].y < hand[6].y && 
+                hand[12].y < hand[10].y && 
+                hand[16].y < hand[14].y
+            );
+        }
+
+        function isThumbsDown(hand) {
+            // Thumb Tip (4) significantly lower than Index MCP (5)
+            // And hand is roughly upright-ish or sideways, but thumb is pointing down
+            return (hand[4].y > hand[5].y + 0.05);
+        }
+
+        // --- MAIN LOOP ---
+        function onResults(results) {
+            bioCtx.clearRect(0, 0, bioCanvas.width, bioCanvas.height);
+            
+            // Smooth Landmarks
+            if(results.multiHandLandmarks) {
+                results.multiHandedness.forEach((res, idx) => {
+                    const label = res.label;
+                    const raw = results.multiHandLandmarks[idx];
+                    
+                    if(!smoothedHands[label]) smoothedHands[label] = raw;
+                    else {
+                        raw.forEach((p, i) => {
+                            smoothedHands[label][i].x += (p.x - smoothedHands[label][i].x) * 0.4; // Responsiveness
+                            smoothedHands[label][i].y += (p.y - smoothedHands[label][i].y) * 0.4;
+                            smoothedHands[label][i].z += (p.z - smoothedHands[label][i].z) * 0.4;
+                        });
+                    }
+
+                    // Draw Skeleton
+                    const hand = smoothedHands[label];
+                    bioCtx.strokeStyle = label === 'Right' ? '#ff9900' : '#ffffff';
+                    bioCtx.lineWidth = 2;
+                    const c = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+                    c.forEach(pair => {
+                        bioCtx.beginPath();
+                        bioCtx.moveTo(hand[pair[0]].x * bioCanvas.width, hand[pair[0]].y * bioCanvas.height);
+                        bioCtx.lineTo(hand[pair[1]].x * bioCanvas.width, hand[pair[1]].y * bioCanvas.height);
+                        bioCtx.stroke();
+                    });
+                });
+            } else {
+                smoothedHands = { Left: null, Right: null };
+            }
+
+            const lHand = smoothedHands['Left'];
+            const rHand = smoothedHands['Right'];
+            const now = Date.now();
+            let modeText = "IDLE";
+
+            // 1. DUAL HAND COMMANDS (High Priority)
+            if (lHand && rHand) {
+                const lPalm = isPalmOpen(lHand);
+                const rPalm = isPalmOpen(rHand);
+                const lFist = isFist(lHand);
+                const rFist = isFist(rHand);
+
+                // Reset
+                if (lFist && rFist) {
+                    if (now - lastActionTime > 1000) {
+                        worldGroup.rotation.set(0,0,0);
+                        worldGroup.position.set(0,0,0);
+                        camera.position.set(0, 5, 15);
+                        camera.lookAt(0,0,0);
+                        showNotify("VIEW RESET");
+                        lastActionTime = now;
+                    }
+                    modeText = "RESETTING";
+                }
+                // Rotate
+                else if (lPalm && rPalm) {
+                    const dx = (rHand[9].x - lHand[9].x);
+                    worldGroup.rotation.y += (dx - 0.5) * 0.08;
+                    modeText = "ROTATING";
+                }
+            }
+
+            // 2. LEFT HAND (Pan / Erase Mod)
+            let isErasing = false;
+            
+            if (lHand) {
+                // Check Erase Pinch (Index + Thumb)
+                // Note: Pinch is prioritized over Fist if both seem close, but we define Fist as all fingers closed
+                if (isPinching(lHand)) {
+                    isErasing = true;
+                    modeText = "ERASER ACTIVE";
+                    // Visual cue
+                    const hx = lHand[8].x * bioCanvas.width;
+                    const hy = lHand[8].y * bioCanvas.height;
+                    bioCtx.strokeStyle = "#ff3333";
+                    bioCtx.beginPath(); bioCtx.arc(hx, hy, 20, 0, Math.PI*2); bioCtx.stroke();
+                } 
+                // Check Grab/Pan (Fist) - Only if not erasing
+                else if (isFist(lHand)) {
+                    const handPos = new THREE.Vector3(lHand[9].x, lHand[9].y, 0);
+                    if (!isPanning) {
+                        isPanning = true;
+                        panStart.copy(handPos);
+                        camStart.copy(worldGroup.position);
+                    } else {
+                        // Axis mapping: 
+                        // Hand move Right (x increases) -> World moves Right (x increases)
+                        // Hand move Up (y decreases) -> World moves Up (y increases)
+                        const dx = (handPos.x - panStart.x) * 30; 
+                        const dy = (handPos.y - panStart.y) * 30; 
+                        
+                        worldGroup.position.x = camStart.x + dx;
+                        worldGroup.position.y = camStart.y - dy; // Invert Y delta because screen Y is top-down
+                    }
+                    modeText = "PANNING";
+                    document.body.style.cursor = "grabbing";
+                } else {
+                    isPanning = false;
+                    document.body.style.cursor = "default";
+                }
+            } else {
+                isPanning = false;
+            }
+
+            // 3. RIGHT HAND (Cursor / Build / Color)
+            if (rHand) {
+                const indexTip = rHand[8];
+                const thumbTip = rHand[4];
+
+                // --- CURSOR MAPPING (FIXED AXIS) ---
+                // Convert MediaPipe (0-1 Top-Left origin) to NDC (-1 to +1 Center origin)
+                // X: 0 -> -1, 1 -> 1. Formula: (x * 2) - 1
+                // Y: 0(Top) -> +1(Up), 1(Bottom) -> -1(Down). Formula: -((y * 2) - 1) which is 1 - 2y
+                
+                const ndcX = (indexTip.x * 2) - 1; 
+                const ndcY = 1 - (indexTip.y * 2); 
+
+                const raycaster = new THREE.Raycaster();
+                raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+
+                // Create a virtual plane that faces the camera or sits at z=0 of the WorldGroup
+                // We want the cursor to move on the grid plane of the WorldGroup
+                const planeZ = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+                // We need to transform this plane based on WorldGroup rotation if we want it to stick to the grid
+                // But for simplicity, let's project onto a plane parallel to camera at depth 0 relative to world
+                
+                const targetZ = 0;
+                const dist = (targetZ - camera.position.z) / raycaster.ray.direction.z;
+                let worldPos = raycaster.ray.origin.clone().add(raycaster.ray.direction.clone().multiplyScalar(dist));
+                
+                // Convert this absolute world position into the local space of our rotated/moved WorldGroup
+                worldGroup.updateMatrixWorld(); // Ensure matrix is fresh
+                const localPos = worldGroup.worldToLocal(worldPos);
+
+                // Snap
+                const gx = Math.round(localPos.x / GRID_SIZE) * GRID_SIZE;
+                const gy = Math.round(localPos.y / GRID_SIZE) * GRID_SIZE;
+                const gz = Math.round(localPos.z / GRID_SIZE) * GRID_SIZE;
+
+                cursor.position.set(gx, gy, gz);
+                
+                // --- ACTIONS ---
+
+                // Color Change (Thumbs Down)
+                if (isThumbsDown(rHand)) {
+                    if (now - colorCooldown > 800) { // Slower cooldown to prevent accidental
+                        currentColorIndex = (currentColorIndex + 1) % PALETTE.length;
+                        updatePaletteUI();
+                        showNotify("COLOR CYCLE", "INDEX " + currentColorIndex);
+                        colorCooldown = now;
+                    }
+                    modeText = "COLOR SWAP";
+                }
+
+                // Build / Erase Logic
+                const rPinch = isPinching(rHand);
+
+                // Visual Cursor State
+                if (isErasing) {
+                    cursor.material.color.setHex(0xff0000);
+                    cursor.material.opacity = 0.8;
+                } else {
+                    cursor.material.color.setHex(PALETTE[currentColorIndex]);
+                    cursor.material.opacity = 0.5;
+                }
+
+                if (now - lastActionTime > 200) {
+                    const key = `${gx},${gy},${gz}`;
+
+                    if (isErasing && rHand) { // Left Pinching + Right Aiming
+                        // Wait, user logic: Left Index Pinch: Erase Voxel.
+                        // Implies: If left is pinching, we erase at current cursor location.
+                         if (voxels.has(key)) {
+                             worldGroup.remove(voxels.get(key));
+                             voxels.delete(key);
+                             countEl.innerText = voxels.size;
+                             lastActionTime = now;
+                         }
+                    } else if (rPinch && !isErasing) { // Build
+                         if (!voxels.has(key)) {
+                             const v = createVoxel(gx, gy, gz, PALETTE[currentColorIndex]);
+                             worldGroup.add(v);
+                             voxels.set(key, v);
+                             countEl.innerText = voxels.size;
+                             lastActionTime = now;
+                             modeText = "BUILDING";
+                         }
+                    }
+                }
+            }
+
+            modeEl.innerText = modeText;
+        }
+
+        // --- INIT ---
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+        hands.onResults(onResults);
+
+        const cam = new Camera(vid, {
+            onFrame: async () => {
+                bioCanvas.width = window.innerWidth;
+                bioCanvas.height = window.innerHeight;
+                await hands.send({image: vid});
+            },
+            width: 1280, height: 720
+        });
+        cam.start();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth/window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>
